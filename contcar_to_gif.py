@@ -121,17 +121,22 @@ def _cell_corners(cell):
             for i in (0, 1) for j in (0, 1) for k in (0, 1)]
 
 
-def fit_sphere(images):
-    """计算覆盖「所有帧原子 + 晶胞盒」的包围球: 返回 [cx, cy, cz, radius]。
+def fit_sphere(images, include_cell=True):
+    """计算取景包围球: 返回 [cx, cy, cz, radius]。
 
-    以包围盒中心为中心、到最远顶点/原子的距离为半径。这样相机会把
-    **整个晶胞** (含真空层) 居中且完整装下, 而不是只居中原子、
-    导致“一边空着、另一边格子被切掉”。
+    include_cell=True (默认): 连同**晶胞盒**一起装下 —— 适合表面/体相结构,
+        保证“一边空着、格子却被切掉”不会发生。
+    include_cell=False: 只按**原子**取景 —— 适合分子/团簇 (晶胞盒很大、
+        含大量真空层时, 若把空盒子也算进去, 分子会小得几乎看不见)。
     """
     pts = [np.asarray(a.get_positions(), dtype=float) for a in images]
-    corners = np.array([p for a in images for p in _cell_corners(a.get_cell())],
-                       dtype=float)
-    allp = np.vstack([p for p in pts if len(p)] + [corners])
+    stuff = [p for p in pts if len(p)]
+    if include_cell:
+        corners = np.array(
+            [p for a in images for p in _cell_corners(a.get_cell())],
+            dtype=float)
+        stuff.append(corners)
+    allp = np.vstack(stuff)
     lo, hi = allp.min(0), allp.max(0)
     center = (lo + hi) / 2.0
     radius = float(np.linalg.norm(allp - center, axis=1).max())
@@ -784,8 +789,9 @@ def render_pngs(images, args, frames_dir, progress=None, cancel=None):
             rot = []
 
     ss = float(getattr(args, "scale", 1.0) or 1.0)
-    # 相机取景基准: 覆盖所有帧原子 + 晶胞盒的包围球 -> 结构始终居中且完整
-    fit = fit_sphere(images)
+    # 相机取景基准: 显示晶胞盒时连同盒子一起取景, 否则只按原子取景
+    # (分子/团簇在超大晶胞里时, 只按原子取景才不会小得看不见)
+    fit = fit_sphere(images, include_cell=bool(getattr(args, "cell", True)))
     print("[信息] 取景包围球 中心=(%.2f, %.2f, %.2f) 半径=%.2f Å" % tuple(fit))
     if getattr(args, "pan_x", 0) or getattr(args, "pan_y", 0):
         print(f"[信息] 视角平移 水平={args.pan_x:+.3f} 垂直={args.pan_y:+.3f} (画布比例)")

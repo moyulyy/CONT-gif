@@ -92,7 +92,7 @@ class StructureViewer(QWidget):
         edges = core.cell_edges(atoms)
         style_d = core.style_for(style)
         try:
-            fit = core.fit_sphere(frames)
+            fit = core.fit_sphere(frames, include_cell=bool(show_cell))
         except Exception:
             fit = None
         # 预设视角: 根据晶胞矢量算出四元数 (正视图 = a-c 面平行屏幕)
