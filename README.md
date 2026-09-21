@@ -4,6 +4,7 @@
 
 **把 VASP 的 CONTCAR 结构一键做成可交互预览、可导出分享的旋转 GIF 动图**
 
+[![Release](https://img.shields.io/github/v/release/moyulyy/CONT-gif?label=Download&color=2ea44f&logo=github)](https://github.com/moyulyy/CONT-gif/releases/latest)
 [![License](https://img.shields.io/badge/License-MIT-2ea44f.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/Python-3.11+-3776AB.svg?logo=python&logoColor=white)](https://www.python.org/)
 [![PySide6](https://img.shields.io/badge/GUI-PySide6-41CD52.svg?logo=qt&logoColor=white)](https://pypi.org/project/PySide6/)
@@ -16,6 +17,11 @@
 *↑ 正视图绕晶胞 c 轴旋转 360°（正交投影，远近同大）*
 
 </div>
+
+> ### ⬇️ 直接下载 · Windows 免安装便携版
+> 前往 **[Releases · v1.0.0](https://github.com/moyulyy/CONT-gif/releases/latest)** 下载
+> `CONTCAR_GIF_v1.0.0_portable_win64.zip`（约 288 MB），解压后双击
+> `CONTCAR_GIF\CONTCAR_GIF.exe` 即可运行，**无需安装 Python**。
 
 ---
 
@@ -174,6 +180,8 @@ CONTCAR ──ASE(vasp)──► 单个 Atoms
 - **配色**：内置 VESTA 经典配色，不需要任何外部 `.vesta` 文件。
 
 ## 📦 打包成便携免安装 exe
+
+> 不想自己打包？直接下载现成的 **[Releases · v1.0.0](https://github.com/moyulyy/CONT-gif/releases/latest)** 便携版。
 
 双击 **`build_exe.bat`**（默认生成**便携文件夹**，推荐）：
 
