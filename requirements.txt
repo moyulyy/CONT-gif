@@ -1,0 +1,16 @@
+# CONTCAR 旋转 GIF 工作台 - 依赖
+# 安装: pip install -r requirements.txt
+# 或双击 install_deps.bat
+
+# 读取 CONTCAR / 结构处理
+ase>=3.22
+numpy
+
+# 合成 GIF
+pillow
+
+# 调用系统浏览器 (Edge/Chrome) 做 3Dmol 逐帧渲染
+playwright
+
+# 图形界面
+PySide6

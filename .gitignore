@@ -1,0 +1,39 @@
+# ---- 打包产物 (体积很大, 不入库, 见 README 自行 build) ----
+/dist/
+/build/
+/build_*/
+*.spec.bak
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+env/
+venv/
+
+# ---- 运行产物 / 日志 ----
+gui_error.log
+*_frames/
+*frames/
+*_preview.png
+
+# 根目录的 VASP 输入输出 (用户自己的数据不入库; samples/ 保留)
+/CONTCAR
+/POSCAR
+/XDATCAR
+/OUTCAR
+/OSZICAR
+/CHGCAR
+/WAVECAR
+
+# 生成的 GIF/PNG (docs/ 下的演示图除外)
+*.gif
+!docs/*.gif
+*.tmp
+
+# ---- 编辑器 / 系统 ----
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
