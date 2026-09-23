@@ -44,7 +44,7 @@ from pathlib import Path
 
 import numpy as np
 from ase.io import read, write
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 
 HERE = Path(__file__).resolve().parent
 
@@ -375,6 +375,377 @@ def parse_rotation(text):
     return out
 
 
+# --------------------------------------------------------------------------
+# 键长 / 键角 / 二面角测量
+# --------------------------------------------------------------------------
+# 测量项统一用 dict 描述: {"kind": "distance"/"angle"/"dihedral",
+#                          "atoms": [i, j, ...], "color": "#rrggbb"}
+# 原子下标为 0 基, 与 3Dmol/XYZ 中的顺序一致。
+MEASURE_ATOMS = {"distance": 2, "angle": 3, "dihedral": 4}
+MEASURE_KIND_BY_COUNT = {2: "distance", 3: "angle", 4: "dihedral"}
+# 每组测量一个颜色, 按新增顺序循环取用
+MEASURE_PALETTE = [
+    "#E6194B", "#3CB44B", "#4363D8", "#F58231", "#911EB4",
+    "#008080", "#9A6324", "#F032E6", "#000075", "#808000",
+    "#46F0F0", "#BCF60C", "#C61A09", "#469990", "#800000",
+]
+
+
+def measure_color(index, palette=None):
+    pal = palette or MEASURE_PALETTE
+    return pal[int(index) % len(pal)]
+
+
+def parse_measures(specs, palette=None):
+    """把 CLI 的 --measure 字符串解析成测量列表。
+
+    支持 ``"0,1"`` / ``"0,1,2"`` / ``"dihedral:0,1,2,3"`` 等形式,
+    未写类型时按原子个数推断 (2=键长, 3=键角, 4=二面角)。
+    """
+    out = []
+    for k, spec in enumerate(specs or []):
+        parts = [p for p in re.split(r"[,;:\-\s]+", str(spec).strip()) if p]
+        kind = None
+        if parts and parts[0].lower() in MEASURE_ATOMS:
+            kind = parts.pop(0).lower()
+        try:
+            idx = [int(p) for p in parts]
+        except ValueError:
+            raise SystemExit(f"[错误] 无法解析 --measure '{spec}' (示例: 0,1,2)")
+        if kind is None:
+            kind = MEASURE_KIND_BY_COUNT.get(len(idx))
+        need = MEASURE_ATOMS.get(kind or "")
+        if need is None or len(idx) < need:
+            raise SystemExit(
+                f"[错误] --measure '{spec}' 原子数不对: {kind or '未知'}需要 {need} 个原子")
+        out.append({"kind": kind, "atoms": idx[:need],
+                    "color": measure_color(k, palette)})
+    return out or None
+
+
+def measure_value(atoms, measure):
+    """按测量类型返回数值 (键长 Å / 键角 ° / 二面角 °)。"""
+    kind = measure.get("kind")
+    idx = [int(i) for i in measure.get("atoms", [])]
+    need = MEASURE_ATOMS.get(kind)
+    if need is None or len(idx) < need:
+        raise ValueError(f"测量项不完整: {measure}")
+    if kind == "distance":
+        return float(atoms.get_distance(idx[0], idx[1]))
+    if kind == "angle":
+        return float(atoms.get_angle(idx[0], idx[1], idx[2]))
+    return float(atoms.get_dihedral(idx[0], idx[1], idx[2], idx[3]))
+
+
+def atom_tag(atoms, i):
+    """原子标签: 元素符号 + 1 基序号, 如 O1 / H12。"""
+    try:
+        sym = atoms.get_chemical_symbols()[int(i)]
+    except Exception:
+        sym = "?"
+    return f"{sym}{int(i) + 1}"
+
+
+def measure_text(atoms, measure):
+    """生成一行测量文本, 如 'd(O1–H2) = 0.980 Å'。"""
+    kind = measure.get("kind")
+    idx = [int(i) for i in measure.get("atoms", [])]
+    tags = "–".join(atom_tag(atoms, i) for i in idx)
+    val = measure_value(atoms, measure)
+    if kind == "distance":
+        return f"d({tags}) = {val:.3f} Å"
+    if kind == "angle":
+        return f"∠({tags}) = {val:.2f}°"
+    return f"φ({tags}) = {val:.2f}°"
+
+
+def measure_labels(atoms, measures):
+    """把测量列表转成 (文本, 颜色) 列表, 供 GIF 标注使用。"""
+    out = []
+    for m in measures or []:
+        try:
+            out.append((measure_text(atoms, m),
+                        str(m.get("color") or "#FF3B30")))
+        except Exception as exc:  # noqa: BLE001
+            out.append((f"测量失败: {exc}", "#FF3B30"))
+    return out
+
+
+_MEASURE_FONT_CANDIDATES = [
+    "C:/Windows/Fonts/msyh.ttc",
+    "C:/Windows/Fonts/msyhbd.ttc",
+    "C:/Windows/Fonts/simhei.ttf",
+    "/System/Library/Fonts/PingFang.ttc",
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+]
+
+
+def load_measure_font(size):
+    """尽量找一个能显示中文/数学符号的字体, 失败退回默认字体。"""
+    for cand in _MEASURE_FONT_CANDIDATES:
+        try:
+            if os.path.isfile(cand):
+                return ImageFont.truetype(cand, int(size))
+        except Exception:
+            continue
+    try:
+        return ImageFont.load_default()
+    except Exception:
+        return None
+
+
+def _is_dark_color(color):
+    color = str(color or "").strip()
+    if color.lower() in ("black", "#000", "#000000", "#1b1b1d", "#141416"):
+        return True
+    if color.startswith("#") and len(color) == 7:
+        try:
+            r = int(color[1:3], 16)
+            g = int(color[3:5], 16)
+            b = int(color[5:7], 16)
+            return (0.299 * r + 0.587 * g + 0.114 * b) < 110
+        except Exception:
+            return False
+    return False
+
+
+def _measure_rgb(color):
+    try:
+        return tuple(int(str(color).lstrip("#")[i:i + 2], 16)
+                     for i in (0, 2, 4))
+    except Exception:
+        return (255, 59, 48)
+
+
+def element_legend(images, args):
+    """返回结构中出现元素的 [(符号, 颜色), ...] (按首次出现顺序)。"""
+    try:
+        elem_map = make_element_map(
+            images, args._vesta_colors, args._vesta_radii,
+            getattr(args, "radius_scale", 0.6), getattr(args, "radius", None),
+            getattr(args, "radius_overrides", None))
+    except Exception:
+        return []
+    order = []
+    try:
+        syms = images[0].get_chemical_symbols()
+    except Exception:
+        return []
+    for sym in syms:
+        if sym not in order:
+            order.append(sym)
+    out = []
+    for el in order:
+        info = elem_map.get(el)
+        if info:
+            out.append((el, info.get("color") or "#B8B8B8"))
+    return out
+
+
+def _info_strip(width, lines=None, bg="white", title=None, legend=None):
+    """生成底部信息条 (RGBA, 宽度固定为 width)。
+
+    legend: [(元素符号, 颜色), ...]  用实心小球 + 符号展示
+    lines:  [(文本, 颜色), ...]      用彩色圆点 + 文本展示
+    两者尽量排成一行, 放不下时自动换行; 字号按宽度自动收缩。
+    """
+    legend = [(str(s), str(c)) for s, c in (legend or [])]
+    lines = [(str(t), str(c)) for t, c in (lines or [])]
+    flows = []
+    if legend:
+        flows.append([{"text": s, "color": c, "style": "ball"}
+                      for s, c in legend])
+    if title:
+        flows.append([{"text": str(title), "color": "#007AFF",
+                       "style": "text"}])
+    if lines:
+        flows.append([{"text": t, "color": c, "style": "dot"}
+                      for t, c in lines])
+    if not flows:
+        return None
+
+    margin = max(8, int(round(width * 0.012)))
+    pad_y = max(5, int(round(width * 0.007)))
+    item_gap = max(10, int(round(width * 0.016)))
+    maxw = max(40, width - 2 * margin)
+
+    probe = ImageDraw.Draw(Image.new("RGBA", (1, 1)))
+    size0 = max(11, int(round(24.0 * max(1.0, width / 1400.0))))
+
+    def layout(size):
+        font = load_measure_font(size)
+        dot = max(6, int(round(size * 0.62)))
+        ball = max(9, int(round(size * 1.15)))
+        flows_cells = []
+        ok = True
+        for flow in flows:
+            cells = []
+            for c in flow:
+                b = probe.textbbox((0, 0), c["text"], font=font)
+                tw = b[2] - b[0]
+                lead = ball if c["style"] == "ball" else \
+                    (dot if c["style"] == "dot" else 0)
+                cw = lead + (6 if lead else 0) + tw
+                if cw > maxw:
+                    ok = False
+                cells.append((c, tw, lead, cw))
+            flows_cells.append(cells)
+        return ok, (size, font, dot, ball, flows_cells)
+
+    chosen = None
+    for size in range(size0, 7, -1):
+        ok, cand = layout(size)
+        if ok:
+            chosen = cand
+            break
+    if chosen is None:
+        chosen = layout(max(8, size0 // 2))[1]
+
+    size, font, dot, ball, flows_cells = chosen
+    row_h = max(size + 4, ball) + 2 * pad_y
+
+    def pack(cells):
+        rows, cur, cur_w = [], [], 0
+        for cell in cells:
+            cw = cell[3]
+            add = cw if not cur else cw + item_gap
+            if cur and cur_w + add > maxw:
+                rows.append(cur)
+                cur, cur_w, add = [], 0, cw
+            cur.append(cell)
+            cur_w += add
+        if cur:
+            rows.append(cur)
+        return rows
+
+    all_rows = []
+    for flow_cells in flows_cells:
+        all_rows.extend(pack(flow_cells))
+    if not all_rows:
+        return None
+
+    row_gap = max(4, int(round(width * 0.006)))
+    strip_h = len(all_rows) * row_h + (len(all_rows) - 1) * row_gap + 2 * pad_y
+
+    dark = _is_dark_color(bg)
+    panel = (0, 0, 0, 150) if dark else (255, 255, 255, 190)
+    edge = (255, 255, 255, 60) if dark else (0, 0, 0, 28)
+    ball_edge = (255, 255, 255, 165) if dark else (0, 0, 0, 70)
+    text_color = (245, 245, 247, 255) if dark else (28, 28, 30, 255)
+
+    strip = Image.new("RGBA", (width, strip_h), (0, 0, 0, 0))
+    d = ImageDraw.Draw(strip)
+    d.rounded_rectangle([0, 0, width - 1, strip_h - 1],
+                        radius=max(6, int(round(width * 0.008))),
+                        fill=panel, outline=edge, width=1)
+
+    y = pad_y
+    for row in all_rows:
+        row_w = sum(cell[3] for cell in row) + item_gap * max(0, len(row) - 1)
+        x = max(margin, int((width - row_w) / 2.0))
+        for cell in row:
+            c, tw, lead, cw = cell
+            rgb = _measure_rgb(c["color"])
+            cy = y + row_h / 2.0
+            tx = x
+            if c["style"] == "ball":
+                d.ellipse([tx, cy - ball / 2.0, tx + ball, cy + ball / 2.0],
+                          fill=rgb + (255,), outline=ball_edge, width=1)
+                tx += ball + 6
+            elif c["style"] == "dot":
+                d.ellipse([tx, cy - dot / 2.0, tx + dot, cy + dot / 2.0],
+                          fill=rgb + (255,))
+                tx += dot + 6
+            b = d.textbbox((0, 0), c["text"], font=font)
+            d.text((tx, cy - (b[3] + b[1]) / 2.0), c["text"], font=font,
+                   fill=text_color if c["style"] in ("text", "ball")
+                   else (rgb + (255,)))
+            x += cw + item_gap
+        y += row_h + row_gap
+    return strip
+
+
+def draw_measure_bottom(im, lines, bg="white", title=None, legend=None):
+    """把元素图例 / 测量文本横铺到图像最下方 (不改变上方内容)。"""
+    if not lines and not legend:
+        return im
+    base = im.convert("RGBA")
+    strip = _info_strip(base.width, lines=lines, bg=bg, title=title,
+                        legend=legend)
+    if strip is None:
+        return im
+    out = Image.new("RGBA", (base.width, base.height + strip.height),
+                    (0, 0, 0, 0))
+    out.paste(base, (0, 0))
+    out.paste(strip, (0, base.height))
+    return out.convert("RGB")
+
+
+def draw_element_legend(im, legend, bg="white"):
+    """只在图像底部加一条「元素 -> 颜色」图例。"""
+    return draw_measure_bottom(im, None, bg=bg, legend=legend)
+
+
+def _panel_captions(size, regions, bg):
+    """在 RGBA 图层上画半透明小标题 (regions: [(x0, text), ...])。"""
+    overlay = Image.new("RGBA", size, (0, 0, 0, 0))
+    if not regions:
+        return overlay
+    d = ImageDraw.Draw(overlay)
+    dark = _is_dark_color(bg)
+    panel = (0, 0, 0, 145) if dark else (255, 255, 255, 185)
+    text_color = (245, 245, 247, 255) if dark else (28, 28, 30, 255)
+    fs = max(11, int(round(size[0] * 0.013)))
+    font = load_measure_font(fs)
+    pad_x = max(6, int(round(fs * 0.7)))
+    pad_y = max(3, int(round(fs * 0.35)))
+    margin = max(6, int(round(size[0] * 0.009)))
+    for x0, text in regions:
+        if not text:
+            continue
+        b = d.textbbox((0, 0), text, font=font)
+        tw = b[2] - b[0]
+        th = b[3] - b[1]
+        rx0 = x0 + margin
+        ry0 = margin
+        d.rounded_rectangle([rx0, ry0, rx0 + tw + 2 * pad_x,
+                             ry0 + th + 2 * pad_y], radius=6, fill=panel)
+        d.text((rx0 + pad_x, ry0 + pad_y - b[1]), text, font=font,
+               fill=text_color)
+    return overlay
+
+
+def compose_measure_pair(left, right, lines, bg="white", gap=None,
+                         captions=("原始结构", "测量标记"), legend=None):
+    """左上: 原始结构 (无标记); 右上: 带网格球结构; 下方: 元素图例 + 测量文本。"""
+    left = left.convert("RGB")
+    right = right.convert("RGB")
+    if gap is None:
+        gap = max(8, int(round(left.width * 0.016)))
+    tw = left.width + gap + right.width
+    th = max(left.height, right.height)
+    top = Image.new("RGB", (tw, th), bg)
+    top.paste(left, (0, 0))
+    top.paste(right, (left.width + gap, 0))
+
+    # 分隔线 (实色, 避免在 RGB 图上用 alpha)
+    dark = _is_dark_color(bg)
+    sep = (78, 78, 82) if dark else (214, 214, 219)
+    d = ImageDraw.Draw(top)
+    midx = left.width + gap // 2
+    d.line([(midx, 0), (midx, th)], fill=sep, width=1)
+
+    # 两个面板的标题
+    if captions:
+        regions = [(0, captions[0]), (left.width + gap, captions[1])]
+        top = Image.alpha_composite(
+            top.convert("RGBA"), _panel_captions(top.size, regions, bg)
+        ).convert("RGB")
+
+    return draw_measure_bottom(top, lines, bg=bg, legend=legend)
+
+
 def style_for(name):
     """基础样式 (不含颜色/半径, 半径由 elem_map 逐元素覆盖)。"""
     if name == "sphere":
@@ -389,10 +760,12 @@ def style_for(name):
 
 def build_html(js, xyz_frames, edges, width, height, bg, style, elem_map,
                show_cell, cell_color, zoom, rot, views=None, spin=0.0,
-               interactive=False, fill=False, orient=None, fit=None, pan=None):
+               interactive=False, fill=False, orient=None, fit=None, pan=None,
+               measures=None):
     views_json = json.dumps(views) if views else "null"
     orient_json = json.dumps(list(orient)) if orient is not None else "null"
     fit_json = json.dumps([float(v) for v in fit]) if fit else "null"
+    measures_json = json.dumps(measures) if measures else "null"
     pan_json = json.dumps([float(v) for v in (pan or (0.0, 0.0))])
     # 关键: fill 模式下必须让 html/body 也有 100% 高度, 否则 div 的
     # height:100% 会退化成 auto → 高度 0 → WebGL 画布不可见。
@@ -428,6 +801,24 @@ window.setOrientation = function(q) { applyCamera(q); };
 window.setPan = function(fx, fy) { PAN = [fx, fy]; refreshView(); };
 window.resetView = function() { PAN = [PAN0[0], PAN0[1]]; applyCamera(INIT_Q); };
 window.setBackground = function(c){ viewer.setBackgroundColor(c, 1.0); viewer.render(); };
+// 原子点选: 开启后点击原子会写入 window._lastPick / _pickSeq, 供宿主轮询
+window._pickCb = null;
+window._pickSeq = 0;
+window._lastPick = -1;
+window._pickQueue = [];
+window.enablePicking = function(on, cb) {
+  window._pickCb = cb || null;
+  if (!on) window._pickQueue = [];
+  viewer.setClickable({}, !!on, function(atom) {
+    if (atom && atom.index !== undefined) {
+      window._lastPick = atom.index;
+      window._pickSeq += 1;
+      window._pickQueue.push(atom.index);
+      if (window._pickCb) window._pickCb(atom.index);
+    }
+  });
+  viewer.render();
+};
 """
     return f"""<!DOCTYPE html>
 <html><head><meta charset="utf-8"><title>3Dmol frame</title>
@@ -448,6 +839,7 @@ const PAN0   = {pan_json};
 const SPIN   = {float(spin)};
 const ZOOM   = {float(zoom)};
 const SHOW_CELL = {str(bool(show_cell)).lower()};
+const MEASURES = {measures_json};
 
 var viewer = $3Dmol.createViewer(document.getElementById('v'),
                                  {{backgroundColor: '{bg}'}});
@@ -489,6 +881,109 @@ function applyStyle() {{
 viewer.addModel(FRAMES[0], 'xyz');
 applyStyle();
 addCell();
+
+// ==================================================================
+// 键长 / 键角 / 二面角测量标注
+// ==================================================================
+// 每个测量组用不同颜色的“网格球”(wireframe 球) 标记参与原子, 并用
+// 圆柱画出相应的键和弧线。形状 (shape) 独立于 model, 因此切换帧时
+// removeAllModels() 不会把它们清掉。
+var MEASURE_SHAPES = [];
+var PENDING_SHAPES = [];
+
+function _atomList() {{
+  return viewer.getAtomsFromSel({{}});
+}}
+function _atomPos(i) {{
+  var a = _atomList()[i];
+  if (!a) return null;
+  return {{x: a.x, y: a.y, z: a.z}};
+}}
+function _atomRadius(i, factor) {{
+  var a = _atomList()[i];
+  var r = 0.4;
+  if (a && typeof ELEM !== 'undefined' && ELEM[a.elem]
+      && ELEM[a.elem].radius) r = ELEM[a.elem].radius;
+  return r * (factor || 1.2);
+}}
+function _pushShape(arr, s) {{ if (s) arr.push(s); return s; }}
+function _cylTo(arr, p, q, color, radius) {{
+  return _pushShape(arr, viewer.addCylinder({{start: p, end: q,
+      radius: (radius || 0.05), color: color, fromCap: 2, toCap: 2}}));
+}}
+// 网格球: 一个半透明实心球 + 一个 wireframe 球
+function _meshTo(arr, c, r, color) {{
+  _pushShape(arr, viewer.addSphere({{center: c, radius: r, color: color,
+                                     opacity: 0.16}}));
+  _pushShape(arr, viewer.addSphere({{center: c, radius: r, color: color,
+                                     wireframe: true, linewidth: 2}}));
+}}
+function _clearShapes(arr) {{
+  for (var i = 0; i < arr.length; i++) {{
+    try {{ viewer.removeShape(arr[i]); }} catch (e) {{}}
+  }}
+  arr.length = 0;
+}}
+function _angleArc(a, b, c, color) {{
+  var ab = {{x: a.x - b.x, y: a.y - b.y, z: a.z - b.z}};
+  var cb = {{x: c.x - b.x, y: c.y - b.y, z: c.z - b.z}};
+  var nab = Math.hypot(ab.x, ab.y, ab.z), ncb = Math.hypot(cb.x, cb.y, cb.z);
+  if (nab < 1e-6 || ncb < 1e-6) return;
+  var u = {{x: ab.x / nab, y: ab.y / nab, z: ab.z / nab}};
+  var w = {{x: cb.x / ncb, y: cb.y / ncb, z: cb.z / ncb}};
+  var dot = Math.max(-1, Math.min(1, u.x * w.x + u.y * w.y + u.z * w.z));
+  var ang = Math.acos(dot);
+  var v = {{x: w.x - dot * u.x, y: w.y - dot * u.y, z: w.z - dot * u.z}};
+  var nv = Math.hypot(v.x, v.y, v.z);
+  if (nv < 1e-6) return;
+  v = {{x: v.x / nv, y: v.y / nv, z: v.z / nv}};
+  var r = Math.min(0.5, 0.32 * Math.min(nab, ncb));
+  var pts = [], steps = 24;
+  for (var i = 0; i <= steps; i++) {{
+    var t = ang * i / steps, ct = Math.cos(t), st = Math.sin(t);
+    pts.push({{x: b.x + r * (u.x * ct + v.x * st),
+               y: b.y + r * (u.y * ct + v.y * st),
+               z: b.z + r * (u.z * ct + v.z * st)}});
+  }}
+  _pushShape(MEASURE_SHAPES, viewer.addCurve({{points: pts, radius: 0.035,
+      color: color, smooth: 0, fromCap: 2, toCap: 2}}));
+}}
+function _drawMeasure(m) {{
+  if (!m || !m.atoms || !m.atoms.length) return;
+  var color = m.color || '#FF3B30';
+  var pts = [];
+  for (var i = 0; i < m.atoms.length; i++) {{
+    var p = _atomPos(m.atoms[i]);
+    if (!p) return;
+    pts.push(p);
+  }}
+  for (var i = 0; i < pts.length - 1; i++)
+    _cylTo(MEASURE_SHAPES, pts[i], pts[i + 1], color, 0.055);
+  for (var i = 0; i < pts.length; i++)
+    _meshTo(MEASURE_SHAPES, pts[i], _atomRadius(m.atoms[i]), color);
+  if (m.kind === 'angle' && pts.length === 3) _angleArc(pts[0], pts[1], pts[2], color);
+}}
+function drawMeasures(list) {{
+  _clearShapes(MEASURE_SHAPES);
+  if (list) {{ for (var i = 0; i < list.length; i++) _drawMeasure(list[i]); }}
+  viewer.render();
+}}
+window.setMeasures = drawMeasures;
+window.clearMeasures = function() {{ drawMeasures(null); }};
+window.restoreMeasures = function() {{ drawMeasures(MEASURES); }};
+// 正在点选、尚未成组的原子: 用高亮网格球提示
+window.setPending = function(list) {{
+  _clearShapes(PENDING_SHAPES);
+  if (list) {{
+    for (var i = 0; i < list.length; i++) {{
+      var p = _atomPos(list[i]);
+      if (p) _meshTo(PENDING_SHAPES, p, _atomRadius(list[i], 1.35), '#FFD60A');
+    }}
+  }}
+  viewer.render();
+}};
+
+drawMeasures(MEASURES);
 
 // ==================================================================
 // 相机: **正交投影 (orthographic)** —— 远近同大, 无“近大远小”。
@@ -749,8 +1244,13 @@ def rotation_views(cell, base_quat, axis_key, total_deg, n, closed=None):
     return out
 
 
-def render_pngs(images, args, frames_dir, progress=None, cancel=None):
-    """用 Playwright + 3Dmol.js 逐帧截图, 返回 PNG 路径列表。
+def render_pngs(images, args, frames_dir, progress=None, cancel=None,
+                clean_dir=None):
+    """用 Playwright + 3Dmol.js 逐帧截图。
+
+    clean_dir 不为 None 时, 同时把「无测量标记」的帧存到该目录
+    (同一浏览器会话 / 同一相机, 仅临时隐藏测量形状), 并返回
+    (marked_paths, clean_paths); 否则只返回 marked_paths。
 
     说明:
         * 3Dmol 的 pngURI() 输出的是 WebGL canvas 的物理像素, 其尺寸为
@@ -834,6 +1334,9 @@ def render_pngs(images, args, frames_dir, progress=None, cancel=None):
 
     html_path = frames_dir / "_viewer.html"
     paths = []
+    clean_paths = []
+    if clean_dir is not None:
+        Path(clean_dir).mkdir(parents=True, exist_ok=True)
     with sync_playwright() as pw:
         browser = launch_browser(pw, args.browser, not args.show_browser)
         page = browser.new_page(viewport={"width": render_w, "height": render_h},
@@ -860,7 +1363,8 @@ def render_pngs(images, args, frames_dir, progress=None, cancel=None):
                           zoom_base, rot, views=views, spin=args.spin,
                           orient=orient, fit=fit,
                           pan=(getattr(args, "pan_x", 0.0) or 0.0,
-                               getattr(args, "pan_y", 0.0) or 0.0))
+                               getattr(args, "pan_y", 0.0) or 0.0),
+                          measures=getattr(args, "measures", None))
         html_path.write_text(html, encoding="utf-8")
 
         page.goto(html_path.resolve().as_uri(), wait_until="domcontentloaded",
@@ -879,12 +1383,71 @@ def render_pngs(images, args, frames_dir, progress=None, cancel=None):
             p = frames_dir / f"frame_{i:05d}.png"
             p.write_bytes(raw)
             paths.append(p)
+            if clean_dir is not None:
+                page.evaluate("window.clearMeasures && window.clearMeasures()")
+                uri_c = page.evaluate("window.capture()")
+                raw_c = base64.b64decode(uri_c.split(",", 1)[1])
+                pc = Path(clean_dir) / f"frame_{i:05d}.png"
+                pc.write_bytes(raw_c)
+                clean_paths.append(pc)
+                page.evaluate(
+                    "window.restoreMeasures && window.restoreMeasures()")
             if (i + 1) % 10 == 0 or i == n - 1:
                 print(f"[信息] 截图 {i + 1}/{n}")
             if progress is not None:
                 progress(i + 1, n)
         browser.close()
+    if clean_dir is not None:
+        return paths, clean_paths
     return paths
+
+
+def render_frames(images, args, frames_dir, progress=None, cancel=None):
+    """渲染帧, 自动处理元素图例与测量版式。
+
+    * 无测量: 单视图, 底部加「元素 -> 颜色」图例。
+    * 有测量: 同屏渲染「无标记」与「有网格球」两套帧, 拼成
+      左上原始结构 / 右上带标记结构 / 下方元素图例 + 测量文本。
+
+    返回可用于 build_gif() 的 PNG 路径列表。
+    """
+    bg = getattr(args, "bg", "white")
+    legend = element_legend(images, args)
+    measures = getattr(args, "measures", None)
+    if not measures:
+        paths = render_pngs(images, args, frames_dir, progress=progress,
+                            cancel=cancel)
+        if not legend or not paths:
+            return paths
+        frames_dir = Path(frames_dir)
+        out = []
+        for i, p in enumerate(paths):
+            im = draw_element_legend(Image.open(p), legend, bg=bg)
+            q = frames_dir / f"legend_{i:05d}.png"
+            im.save(q)
+            out.append(q)
+        return out
+
+    frames_dir = Path(frames_dir)
+    clean_dir = frames_dir / "_clean"
+    clean_dir.mkdir(parents=True, exist_ok=True)
+
+    print("[信息] 测量版式: 同屏渲染「带标记 / 无标记」两套帧…")
+    marked, clean = render_pngs(images, args, frames_dir,
+                                progress=progress, cancel=cancel,
+                                clean_dir=clean_dir)
+    if not marked or not clean:
+        return []
+
+    lines = measure_labels(images[0], measures)
+    out = []
+    for i, (cp, mp) in enumerate(zip(clean, marked)):
+        im = compose_measure_pair(Image.open(cp), Image.open(mp), lines,
+                                  bg=bg, legend=legend)
+        p = frames_dir / f"combo_{i:05d}.png"
+        im.save(p)
+        out.append(p)
+    return out
 
 
 # --------------------------------------------------------------------------
@@ -892,16 +1455,16 @@ def render_pngs(images, args, frames_dir, progress=None, cancel=None):
 # --------------------------------------------------------------------------
 def build_gif(paths, out_path, duration, loop, colors, pingpong, width,
               annotate=None):
-    """合成 GIF。annotate(i, PIL.Image) -> PIL.Image 可为每帧叠加标注。"""
-    frames = []
-    for i, p in enumerate(paths):
-        im = Image.open(p).convert("RGB")
-        if annotate is not None:
-            im = annotate(i, im)
-        frames.append(im)
-    if width and frames[0].width != width:
+    """合成 GIF。annotate(i, PIL.Image) -> PIL.Image 可为每帧叠加标注。
+
+    标注在缩放到目标宽度之后应用, 保证文字清晰、不随超采样模糊。
+    """
+    frames = [Image.open(p).convert("RGB") for p in paths]
+    if width and frames and frames[0].width != width:
         h = round(width * frames[0].height / frames[0].width)
         frames = [f.resize((width, h), Image.LANCZOS) for f in frames]
+    if annotate is not None:
+        frames = [annotate(i, im) for i, im in enumerate(frames)]
     if pingpong and len(frames) > 2:
         frames = frames + frames[-2:0:-1]
 
@@ -964,6 +1527,10 @@ def main():
                     help="自定义视角旋转, 如 '20x,-20y,0z', 覆盖 --view")
     ap.add_argument("--spin", type=float, default=0.0,
                     help="每帧额外绕 y 轴旋转的角度, 如 2 (默认 0 不转)")
+    ap.add_argument("--measure", action="append", default=None, metavar="ATOMS",
+                    help="添加一组测量 (可重复), 如 --measure 0,1 "
+                         "--measure dihedral:0,1,2,3; 原子下标从 0 开始, "
+                         "2/3/4 个原子分别为键长/键角/二面角")
     ap.add_argument("--rot-axis", default="c", choices=list(ROT_AXIS_NAMES),
                     help="绕轴旋转: a/b/c (晶胞轴) 或 screen-v/screen-h (默认 c)")
     ap.add_argument("--rot-angle", type=float, default=360.0, dest="rot_total",
@@ -1004,6 +1571,10 @@ def main():
     args.render_width = args.width
     args.views = None          # 交给 render_pngs 根据 view/rot-axis 计算
     args.view_start = None
+    args.measures = parse_measures(getattr(args, "measure", None))
+    if args.measures:
+        print("[信息] 测量标注: " + "; ".join(
+            f"{m['kind']} {m['atoms']}" for m in args.measures))
 
     atoms = load_contcar(args.file)
     images = build_frames(atoms, args.frames, args.repeat)
@@ -1023,14 +1594,16 @@ def main():
         cleanup = not args.keep_frames
 
     try:
-        paths = render_pngs(images, args, frames_dir)
+        paths = render_frames(images, args, frames_dir)
 
         if single_png:
-            Image.open(paths[0]).save(args.out)
+            Image.open(paths[0]).convert("RGB").save(args.out)
             print(f"[完成] 单帧图片: {args.out}")
         else:
             duration = max(1, int(round(1000.0 / args.fps)))
-            gif_width = args.gif_width if args.gif_width else args.width
+            # 测量版式已经拼成宽图, 不再缩放, 避免文字变小
+            gif_width = None if args.measures else (
+                args.gif_width if args.gif_width else args.width)
             n = build_gif(paths, args.out, duration, args.loop,
                           args.colors, args.pingpong, gif_width)
             size = os.path.getsize(args.out) / 1e6

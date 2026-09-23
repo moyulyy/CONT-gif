@@ -148,6 +148,11 @@ VIEW_MODE_ITEMS = [("preset", "预设视角"), ("capture_a", "捕获视角 A")]
 ROT_AXIS_ITEMS = [("", "不旋转"), ("a", "a 轴"), ("b", "b 轴"),
                   ("c", "c 轴"), ("screen-v", "屏幕竖直"),
                   ("screen-h", "屏幕水平")]
+# 测量模式: key = core.MEASURE_ATOMS 中的类型, 空串 = 关闭
+MEASURE_ITEMS = [("", "关闭测量"), ("distance", "键长 (选 2 原子)"),
+                 ("angle", "键角 (选 3 原子)"),
+                 ("dihedral", "二面角 (选 4 原子)")]
+MEASURE_KIND_NAME = {"distance": "键长", "angle": "键角", "dihedral": "二面角"}
 
 
 def _build_periodic_layout():
@@ -674,6 +679,12 @@ class MainWindow(QWidget):
         self._loading = False
         self._viewer_ready = False
 
+        # 键长 / 键角 / 二面角测量
+        self.measurements = []          # [{'kind','atoms','color'}]
+        self._measure_kind = ""         # 当前测量模式 (空 = 关闭)
+        self._pending_atoms = []        # 已点选、尚未成组的原子
+        self._measure_color_i = 0       # 下一个测量组的调色板下标
+
         self._build()
         self._restore_defaults()
 
@@ -1061,8 +1072,9 @@ class MainWindow(QWidget):
         row = QHBoxLayout()
         row.setSpacing(10)
         self.btn_pick = QPushButton("选择 CONTCAR")
-        self.btn_pick.setObjectName("Secondary")
+        self.btn_pick.setObjectName("Primary")
         self.btn_pick.setCursor(Qt.PointingHandCursor)
+        self.btn_pick.setToolTip("选择 CONTCAR / POSCAR 后自动加载")
         self.btn_pick.clicked.connect(self._pick_structure)
         row.addWidget(self.btn_pick)
 
@@ -1079,11 +1091,6 @@ class MainWindow(QWidget):
         self.lbl_files.setMinimumWidth(0)
         row.addWidget(self.lbl_files, 1)
 
-        self.btn_load2 = QPushButton("开始加载")
-        self.btn_load2.setObjectName("Primary")
-        self.btn_load2.setCursor(Qt.PointingHandCursor)
-        self.btn_load2.clicked.connect(self._load_clicked)
-        row.addWidget(self.btn_load2)
         card.add_layout(row)
         outer.addWidget(card)
 
@@ -1098,17 +1105,173 @@ class MainWindow(QWidget):
         hv.setSpacing(8)
         self.viewer = StructureViewer()
         self.viewer.cameraCaptured.connect(self._on_camera_captured)
+        self.viewer.atomClicked.connect(self._on_atom_clicked)
         hv.addWidget(self.viewer, 1)
         body.addWidget(holder, 1)
 
-        # ---- 右栏: 视角与显示 ----
+        # ---- 右栏: 测量 + 视角与显示 ----
         side, sv = self._side_panel()
+        sv.addWidget(self._measure_card())
         sv.addWidget(self._view_settings_card())
         sv.addStretch(1)
         body.addWidget(side, 0)
 
         outer.addLayout(body, 1)
         return page
+
+    # ---- 键长 / 键角 / 二面角测量 ----
+    def _measure_card(self):
+        card = Card("键长 / 键角 / 二面角")
+        self.cb_measure = ComboBox()
+        for key, label in MEASURE_ITEMS:
+            self.cb_measure.addItem(label, key)
+        self.cb_measure.currentIndexChanged.connect(self._on_measure_mode)
+        card.add(self.cb_measure)
+        card.add(hint_label(
+            "选定类型后, 在左侧 3D 窗口依次点选原子; 选满所需个数自动成组。"
+            "每组用不同颜色的网格球标记, 数值会写入 GIF。"))
+
+        self.lbl_measure_sel = QLabel("待选原子: 无")
+        self.lbl_measure_sel.setObjectName("Hint")
+        self.lbl_measure_sel.setWordWrap(True)
+        card.add(self.lbl_measure_sel)
+
+        self.measure_list = QWidget()
+        self.measure_list_lay = QVBoxLayout(self.measure_list)
+        self.measure_list_lay.setContentsMargins(0, 0, 0, 0)
+        self.measure_list_lay.setSpacing(6)
+        card.add(self.measure_list)
+
+        self.lbl_measure_empty = hint_label("尚无测量。")
+        card.add(self.lbl_measure_empty)
+        self._update_pending_label()
+        return card
+
+    def _on_measure_mode(self, *_):
+        self._measure_kind = self.cb_measure.currentData() or ""
+        self._pending_atoms = []
+        try:
+            self.viewer.set_measure_mode(bool(self._measure_kind))
+            self.viewer.set_pending([])
+        except Exception:  # noqa: BLE001
+            pass
+        self._update_pending_label()
+
+    def _atom_label(self, i):
+        try:
+            return core.atom_tag(self.structure, i)
+        except Exception:  # noqa: BLE001
+            return f"#{i + 1}"
+
+    def _update_pending_label(self):
+        kind = self._measure_kind
+        need = core.MEASURE_ATOMS.get(kind, 0)
+        if not kind:
+            self.lbl_measure_sel.setText("待选原子: 无 (未开启测量)")
+            return
+        tags = [self._atom_label(i) for i in self._pending_atoms]
+        name = MEASURE_KIND_NAME.get(kind, kind)
+        tail = ", ".join(tags) if tags else "请在 3D 窗口中点击原子"
+        self.lbl_measure_sel.setText(
+            f"{name} 待选 ({len(self._pending_atoms)}/{need}): {tail}")
+
+    def _on_atom_clicked(self, idx):
+        if not self._measure_kind or self.structure is None:
+            return
+        n = len(self.structure)
+        if idx < 0 or idx >= n or idx in self._pending_atoms:
+            return
+        self._pending_atoms.append(int(idx))
+        try:
+            self.viewer.set_pending(self._pending_atoms)
+        except Exception:  # noqa: BLE001
+            pass
+        need = core.MEASURE_ATOMS.get(self._measure_kind, 0)
+        if need and len(self._pending_atoms) >= need:
+            self._commit_measurement()
+        else:
+            self._update_pending_label()
+
+    def _commit_measurement(self):
+        kind = self._measure_kind
+        need = core.MEASURE_ATOMS.get(kind, 0)
+        atoms_idx = list(self._pending_atoms[:need])
+        if not need or len(atoms_idx) < need:
+            return
+        color = core.measure_color(self._measure_color_i)
+        self._measure_color_i += 1
+        m = {"kind": kind, "atoms": atoms_idx, "color": color}
+        self.measurements.append(m)
+        self._pending_atoms = []
+        try:
+            self.viewer.set_pending([])
+        except Exception:  # noqa: BLE001
+            pass
+        self._refresh_viewer_measures()
+        self._rebuild_measure_list()
+        self._update_pending_label()
+        try:
+            self._log(f"[测量] {core.measure_text(self.structure, m)}")
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _delete_measurement(self, m):
+        if m in self.measurements:
+            self.measurements.remove(m)
+        self._refresh_viewer_measures()
+        self._rebuild_measure_list()
+
+    def _refresh_viewer_measures(self):
+        try:
+            self.viewer.set_measures(self.measurements)
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _rebuild_measure_list(self):
+        if not hasattr(self, "measure_list_lay"):
+            return
+        while self.measure_list_lay.count():
+            item = self.measure_list_lay.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.setParent(None)
+        for m in self.measurements:
+            self.measure_list_lay.addWidget(self._measure_row(m))
+        self.lbl_measure_empty.setVisible(not self.measurements)
+
+    def _measure_row(self, m):
+        row = QWidget()
+        lay = QHBoxLayout(row)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(8)
+        sw = QLabel()
+        sw.setFixedSize(12, 12)
+        sw.setStyleSheet(
+            f"background:{m.get('color', '#FF3B30')}; border-radius:6px;")
+        lay.addWidget(sw)
+        try:
+            text = core.measure_text(self.structure, m)
+        except Exception:  # noqa: BLE001
+            text = f"{MEASURE_KIND_NAME.get(m['kind'], m['kind'])} {m['atoms']}"
+        lab = QLabel(text)
+        lab.setObjectName("FieldLabel")
+        lab.setWordWrap(True)
+        lab.setToolTip(text)
+        lay.addWidget(lab, 1)
+        btn = QPushButton("X")
+        btn.setCursor(Qt.PointingHandCursor)
+        btn.setFixedSize(20, 20)
+        btn.setToolTip("删除这一组测量")
+        # #Ghost 的 padding 会撑满小按钮, 这里单独给紧凑样式
+        btn.setStyleSheet(
+            "QPushButton { background: transparent; border: none;"
+            " border-radius: 6px; color: #FF3B30; font-size: 13px;"
+            " font-weight: 700; padding: 0px; }"
+            "QPushButton:hover { background: rgba(255,59,48,0.14); }"
+            "QPushButton:pressed { background: rgba(255,59,48,0.26); }")
+        btn.clicked.connect(lambda _=False, mm=m: self._delete_measurement(mm))
+        lay.addWidget(btn)
+        return row
 
     def _on_viewmode_changed(self, mode):
         preset_mode = (mode == "preset")
@@ -1616,6 +1779,8 @@ class MainWindow(QWidget):
             self.structure_path = path
             self._update_file_label()
             self._log(f"[信息] 已选择结构文件: {path}")
+            # 选完即自动加载, 无需再点「开始加载」
+            self._load_clicked()
 
     def _update_file_label(self):
         name = Path(self.structure_path).name if self.structure_path else "(未选)"
@@ -1680,7 +1845,6 @@ class MainWindow(QWidget):
         }
         self.cancel_evt.clear()
         self._loading = True
-        self.btn_load2.setEnabled(False)
         self.status.setText("正在加载 CONTCAR…")
         self.worker = threading.Thread(
             target=self._load_worker, args=(path, cfg), daemon=True)
@@ -1710,11 +1874,16 @@ class MainWindow(QWidget):
 
     def _on_loaded(self, atoms, elem_map, maps):
         self._loading = False
-        self.btn_load2.setEnabled(True)
         self.structure = atoms
         self.elem_map = elem_map
         self._vesta_colors, self._vesta_radii = maps
         symbols = atoms.get_chemical_symbols()
+        # 换了结构, 旧的原子下标不再对应, 清空测量
+        self.measurements = []
+        self._pending_atoms = []
+        self._measure_color_i = 0
+        self._rebuild_measure_list()
+        self._update_pending_label()
         self._reload_viewer()
         info = (f"已加载 · {len(atoms)} 原子\n"
                 f"元素: {', '.join(sorted(set(symbols)))}")
@@ -1740,7 +1909,10 @@ class MainWindow(QWidget):
                 bg=self.cb_bg.currentText(),
                 zoom=self.sl_zoom.value(),
                 view=self.seg_view.value(),
-                pan=(self.sl_panx.value(), self.sl_pany.value()))
+                pan=(self.sl_panx.value(), self.sl_pany.value()),
+                measures=self.measurements)
+            self.viewer.set_pending(self._pending_atoms)
+            self.viewer.set_measure_mode(bool(self._measure_kind))
             self._viewer_ready = True
             self._log("[信息] 3D 窗口已刷新")
         except Exception as exc:  # noqa: BLE001
@@ -1801,6 +1973,8 @@ class MainWindow(QWidget):
             no_vesta_file=True,
             color_overrides=dict(self.color_overrides),
             radius_overrides=dict(self.radius_overrides),
+            measures=[{"kind": m["kind"], "atoms": list(m["atoms"]),
+                       "color": m["color"]} for m in self.measurements],
 
             cell=self.sw_cell.isChecked(),
             cell_color="#888888",
@@ -1841,7 +2015,7 @@ class MainWindow(QWidget):
             self._toast("提示", "已有任务在运行, 请等待或点击「停止」。")
             return
         if self.structure is None:
-            self._toast("提示", "请先在「结构浏览」页点击「开始加载」。")
+            self._toast("提示", "请先在「结构浏览」页选择 CONTCAR 结构文件。")
             return
         try:
             args = self.collect_args()
@@ -1870,7 +2044,6 @@ class MainWindow(QWidget):
 
     def _set_running(self, running, preview=False):
         self.btn_run.setEnabled(not running)
-        self.btn_load2.setEnabled(not running)
         if running:
             self.status.setText("预览中…" if preview else "渲染中…")
 
@@ -1912,7 +2085,7 @@ class MainWindow(QWidget):
                 frames_dir = Path(tempfile.mkdtemp(prefix="3dmol-frames-"))
                 cleanup = True
 
-            paths = core.render_pngs(
+            paths = core.render_frames(
                 images, args, frames_dir,
                 progress=lambda i, n: self.q.put(("progress", i, n)),
                 cancel=self.cancel_evt.is_set)
@@ -1936,7 +2109,9 @@ class MainWindow(QWidget):
                 self.q.put(("log", "已取消, 未生成 GIF"))
             else:
                 duration = max(1, int(round(1000.0 / args.fps)))
-                gif_width = args.gif_width or args.width
+                # 测量版式已拼成宽图, 保持原始分辨率避免文字缩小
+                gif_width = None if getattr(args, "measures", None) else \
+                    (args.gif_width or args.width)
                 n = core.build_gif(paths, args.out, duration, args.loop,
                                    args.colors, args.pingpong, gif_width)
                 size = os.path.getsize(args.out) / 1e6
@@ -1959,6 +2134,11 @@ class MainWindow(QWidget):
     # 消息轮询
     # ==================================================================
     def _poll(self):
+        if self._measure_kind:
+            try:
+                self.viewer.poll_pick()
+            except Exception:  # noqa: BLE001
+                pass
         try:
             while True:
                 msg = self.q.get_nowait()
@@ -2001,7 +2181,6 @@ class MainWindow(QWidget):
                     self._set_running(False)
                     if self._loading:
                         self._loading = False
-                        self.btn_load2.setEnabled(True)
                     if not msg[1]:
                         self.status.setText("已停止")
         except queue.Empty:

@@ -19,8 +19,8 @@
 </div>
 
 > ### ⬇️ 直接下载 · Windows 免安装便携版
-> 前往 **[Releases · v1.0.0](https://github.com/moyulyy/CONT-gif/releases/latest)** 下载
-> `CONTCAR_GIF_v1.0.0_portable_win64.zip`（约 288 MB），解压后双击
+> 前往 **[Releases · v1.1.0](https://github.com/moyulyy/CONT-gif/releases/latest)** 下载
+> `CONTCAR_GIF_v1.1.0_portable_win64.zip`（约 290 MB），解压后双击
 > `CONTCAR_GIF\CONTCAR_GIF.exe` 即可运行，**无需安装 Python**。
 
 ---
@@ -35,6 +35,8 @@
 |---|---|
 | 🖥️ | **iOS / macOS 风格 GUI**（PySide6）：无边框自绘窗口、红黄绿交通灯、深浅主题 |
 | 🧊 | **内嵌 3Dmol.js 交互 3D 窗口**：拖动旋转、滚轮缩放，先「看」再出图 |
+| 📏 | **键长 / 键角 / 二面角测量**：在 3D 窗口点选原子，每组用不同颜色的网格球标记；生成 GIF 时自动拼成「左上原始结构 / 右上带标记结构 / 下方数据文本」版式 |
+| 🏷️ | **元素颜色图例**：GIF 底部自动附带「元素 → 颜色」图例，每个 ball 对应的元素一目了然 |
 | 🎥 | **一键生成旋转 GIF**：绕晶胞 `a/b/c` 轴或屏幕竖直/水平匀速旋转 |
 | 🔄 | **无缝循环**：整圈按 `k/n` 采样，首尾不重复，GIF 循环无停顿 |
 | 📐 | **正交投影（orthographic）**：远近同大，没有「近大远小」，旋转时模型大小恒定 |
@@ -57,7 +59,7 @@ CONT-gif/
 ├─ 3dmol/3Dmol-min.js     # ★ 本地 3Dmol.js (离线可用)
 ├─ assets/app.ico         # ★ 应用图标
 ├─ make_icon.py           # 重新生成图标 (可选)
-├─ samples/CONTCAR        # 测试用样例结构 (H/C/O/Co/Ni, 193 原子)
+├─ samples/CONTCAR        # 测试用样例结构 (C7H14, 21 原子)
 ├─ docs/demo.gif          # README 演示动图
 ├─ requirements.txt       # ★ Python 依赖清单
 ├─ install_deps.bat       # ★ 一键安装依赖 (双击)
@@ -98,10 +100,16 @@ run_gif.bat
 
 ### 3. 使用流程
 
-1. **结构浏览**页：点「选择 CONTCAR」→「开始加载」，3D 窗口显示结构。
+1. **结构浏览**页：点「选择 CONTCAR」选中文件后**自动加载**，3D 窗口直接显示结构。
    - 拖动旋转 / 滚轮缩放；右栏可切**预设视角**、调缩放/平移。
    - 想用自定义方向：拖到满意角度 → 点「设为视角 A」→ 右栏「视角模式」选 **捕获视角 A**。
    - 设置 **旋转轴**（默认 c 轴）、**旋转角度**（默认 360°）、**旋转帧数**（默认 60）。
+   - **键长 / 键角 / 二面角测量**：右栏「键长 / 键角 / 二面角」卡片选择类型，
+     然后在 3D 窗口依次点选原子（键长 2 个 / 键角 3 个 / 二面角 4 个），
+     选满自动成组；每组用不同颜色的网格球标记，列表中每条测量右侧的 `X` 可单独删除。
+     生成 GIF 时自动拼成：**左上原始结构 / 右上带网格球结构 / 下方元素图例 + 横排测量文本**。
+   - **元素颜色图例**：无论是否开启测量，生成的 GIF 底部都会附上本结构中各元素对应的
+     颜色图例（实心小球 + 元素符号），方便辨别每个 ball 是什么元素。
    - 「元素配色…」打开完整周期表，逐元素改颜色 / ball 直径。
 2. **GIF 设置**页：输出文件、画布宽高、帧率、颜色数、高清倍率、乒乓/循环、保留 PNG；
    可点「预览单帧」检查一帧。
@@ -123,6 +131,10 @@ D:\miniconda3\envs\chem_env\python.exe contcar_to_gif.py ^
 rem 俯视图 + 绕 a 轴半圈; 球模型; 黑背景; 2 倍超采样
 D:\miniconda3\envs\chem_env\python.exe contcar_to_gif.py --view top --rot-axis a ^
     --rot-angle 180 --style sphere --bg black --scale 2
+
+rem 测量标注: 键长 0-1, 键角 0-1-2, 二面角 0-1-2-3 (原子下标从 0 开始)
+D:\miniconda3\envs\chem_env\python.exe contcar_to_gif.py ^
+    --measure 0,1 --measure 0,1,2 --measure dihedral:0,1,2,3
 ```
 
 <details>
@@ -136,6 +148,7 @@ D:\miniconda3\envs\chem_env\python.exe contcar_to_gif.py --view top --rot-axis a
 | `--view` | `front` | 基准视角 `front/back/top/bottom/right/left` |
 | `--rot-axis` | `c` | 旋转轴 `a/b/c` 或 `screen-v/screen-h` |
 | `--rot-angle` | `360` | 整段旋转总角度（度） |
+| `--measure` | 无 | 添加一组测量（可重复），如 `--measure 0,1`（键长）/ `0,1,2`（键角）/ `dihedral:0,1,2,3`（二面角），下标从 0 开始 |
 | `--fps` | `20` | GIF 帧率 |
 | `-w, --width` | `600` | 画布宽（像素） |
 | `--height` | 同宽 | 画布高（像素） |
@@ -181,7 +194,7 @@ CONTCAR ──ASE(vasp)──► 单个 Atoms
 
 ## 📦 打包成便携免安装 exe
 
-> 不想自己打包？直接下载现成的 **[Releases · v1.0.0](https://github.com/moyulyy/CONT-gif/releases/latest)** 便携版。
+> 不想自己打包？直接下载现成的 **[Releases · v1.1.0](https://github.com/moyulyy/CONT-gif/releases/latest)** 便携版。
 
 双击 **`build_exe.bat`**（默认生成**便携文件夹**，推荐）：
 
@@ -217,6 +230,22 @@ dist\CONTCAR_GIF\CONTCAR_GIF.exe --selftest "%CD%\dist\CONTCAR_GIF\_internal\sam
 3. **3D 窗口黑屏** → 更新显卡驱动；确认没有给其父控件加阴影特效（程序已规避）。
 4. **GIF 太大** → 减小旋转帧数 / 画布尺寸 / 颜色数。
 5. **想更清晰** → 调大画布宽高，并把「高清倍率」设为 2。
+
+## 📝 更新日志
+
+### v1.1.0
+
+- ✨ **键长 / 键角 / 二面角测量**：在「结构浏览」页 3D 窗口直接点选原子（2/3/4 个分别为
+  键长 / 键角 / 二面角），每组用不同颜色的**网格球**标记；列表中每条测量右侧的 `X` 可单独删除。
+- 🖼️ **测量版式 GIF**：开启测量后自动拼成「左上原始结构 / 右上带网格球结构 /
+  下方横排测量文本」，同一浏览器会话同帧双截，两视图相机完全一致。
+- 🏷️ **元素颜色图例**：无论是否开启测量，GIF 底部均自动附带「元素 → 颜色」图例。
+- ⚡ **选择即加载**：选中 CONTCAR 后自动加载，去掉「开始加载」按钮。
+- 🎯 网格球直径约为实心原子的 1.2 倍，标记清晰不遮挡。
+
+### v1.0.0
+
+- 首个版本：CONTCAR → 旋转 GIF 工作台（GUI + CLI + 正交投影 + 六个标准视角 + VESTA 配色）。
 
 ## 📄 License
 

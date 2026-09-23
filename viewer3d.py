@@ -32,6 +32,7 @@ class StructureViewer(QWidget):
 
     ready = Signal()
     cameraCaptured = Signal(str, list, int)   # slot('A'/'B'), view(8 floats), css_width
+    atomClicked = Signal(int)                 # 被点选的原子下标 (0 基)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -40,6 +41,9 @@ class StructureViewer(QWidget):
         self._pan = [0.0, 0.0]
         self._pending: List[str] = []
         self._poll_count = 0
+        self._measures: List[dict] = []
+        self._pending_atoms: List[int] = []
+        self._pick_on = False
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.setMinimumHeight(300)
 
@@ -85,7 +89,9 @@ class StructureViewer(QWidget):
     def load_structure(self, atoms, elem_map, style="ballstick",
                        show_cell=True, cell_color="#888888", bg="white",
                        zoom=1.0, view="front", rot=None,
-                       pan=(0.0, 0.0)):
+                       pan=(0.0, 0.0), measures=None):
+        if measures is not None:
+            self._measures = [dict(m) for m in measures]
         js = core.ensure_3dmol_js()
         frames = [atoms]
         xyz = core.frames_to_xyz(frames)
@@ -111,7 +117,7 @@ class StructureViewer(QWidget):
         html = core.build_html(js, xyz, edges, 10, 10, bg, style_d, elem_map,
                                show_cell, cell_color, zoom, rot_list,
                                interactive=True, fill=True, orient=orient,
-                               fit=fit, pan=list(pan))
+                               fit=fit, pan=list(pan), measures=self._measures)
         self._pan = list(pan)
         self._orient = list(orient) if orient else None
         path = self._tmpdir / "viewer.html"
@@ -188,6 +194,46 @@ class StructureViewer(QWidget):
 
     def set_background(self, color):
         self.run(f"window.setBackground('{color}');")
+
+    # ------------------------------------------------------------------
+    # 键长 / 键角 / 二面角测量
+    # ------------------------------------------------------------------
+    def set_measures(self, measures):
+        """更新已提交的测量标注 (每组不同颜色网格球)。"""
+        self._measures = [dict(m) for m in (measures or [])]
+        self.run(f"window.setMeasures({json.dumps(self._measures)});")
+
+    def set_pending(self, indices):
+        """更新正在点选、尚未成组的原子高亮。"""
+        self._pending_atoms = [int(i) for i in (indices or [])]
+        self.run(f"window.setPending({json.dumps(self._pending_atoms)});")
+
+    def set_measure_mode(self, on):
+        """开启 / 关闭原子点选。"""
+        self._pick_on = bool(on)
+        self.run(f"window.enablePicking({json.dumps(bool(on))});")
+
+    def poll_pick(self):
+        """取出页面里排队的点选原子, 逐个发出 atomClicked。"""
+        if not self._ready:
+            return
+
+        js = "JSON.stringify(window._pickQueue ? window._pickQueue.splice(0) : [])"
+
+        def cb(s):
+            if not s:
+                return
+            try:
+                idxs = json.loads(s)
+            except Exception:
+                return
+            for idx in idxs or []:
+                try:
+                    self.atomClicked.emit(int(idx))
+                except Exception:
+                    continue
+
+        self.web.page().runJavaScript(js, cb)
 
     # ------------------------------------------------------------------
     def closeEvent(self, event):  # noqa: N802
