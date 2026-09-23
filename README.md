@@ -14,7 +14,7 @@
 
 <img src="docs/demo.gif" alt="CONTCAR 旋转 GIF 演示" width="440">
 
-*↑ 正视图绕晶胞 c 轴旋转 360°（正交投影，远近同大）*
+*↑ 正视图绕晶胞 c 轴旋转 360°（正交投影，远近同大）；GIF 底部自动附带元素颜色图例*
 
 </div>
 
@@ -48,6 +48,16 @@
 | 📦 | **可打包便携 exe**：免安装、无需 Python，拷到别的 Windows 电脑即可运行 |
 | 🌐 | **离线可用**：本地 3Dmol.js；渲染用系统自带 Edge/Chrome，无需额外浏览器 |
 
+## 🖼️ 效果展示
+
+### 测量版式（键长 / 键角 / 二面角）
+
+开启测量后，GIF 自动拼成「**左上原始结构 / 右上带网格球标记结构 / 下方元素图例 + 测量数据文本**」，
+同一浏览器会话同帧双截，两个视图相机完全一致：
+
+<img src="docs/measure_demo.gif" alt="测量版式演示" width="820">
+
+
 ## 📂 目录结构
 
 ```
@@ -60,7 +70,8 @@ CONT-gif/
 ├─ assets/app.ico         # ★ 应用图标
 ├─ make_icon.py           # 重新生成图标 (可选)
 ├─ samples/CONTCAR        # 测试用样例结构 (C7H14, 21 原子)
-├─ docs/demo.gif          # README 演示动图
+├─ docs/demo.gif          # README 演示动图 (旋转 + 元素图例)
+├─ docs/measure_demo.gif  # 测量版式演示动图
 ├─ requirements.txt       # ★ Python 依赖清单
 ├─ install_deps.bat       # ★ 一键安装依赖 (双击)
 ├─ run_gui.bat            # 双击启动 GUI (无控制台)
